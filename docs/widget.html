@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Villa La Roccia del Poggio - availability</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600&display=swap" rel="stylesheet">
+<style>html,body{margin:0;padding:8px 4px;background:#fff}</style></head>
+<body>
+<div id="lrp-calendar"></div>
+<script>
+  var l = (new URLSearchParams(location.search).get("lang") || "en").slice(0, 2);
+  document.getElementById("lrp-calendar").setAttribute("data-lang", l);
+  document.documentElement.lang = l;
+</script>
+<script src="calendar.js"></script>
+</body></html>

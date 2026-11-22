@@ -1,0 +1,3 @@
+from,to,note
+# One line per blocked period. "from" = first night blocked, "to" = check-out day (that night stays free).
+# Dates as YYYY-MM-DD. Lines starting with # are ignored.
