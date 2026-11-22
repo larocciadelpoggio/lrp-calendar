@@ -59,9 +59,10 @@ def load_config():
 # holds what is set in config.json -> "columns" (spreadsheet letters):
 #   date  = the date                      (A)
 #   open  = 1 / 0 - 0 closes the night     (B)
-#   (C = Booked, filled in by the sheet itself from docs/booked.csv)
+#   booked= W = direct booking (typed by you); A / V = Airbnb / Vrbo bookings,
+#           written by the sheet's own script                       (C)
 #   min   = minimum nights from that date (D)
-#   price = website price per night       (J = input price on Vrbo)
+#   price = website price per night       (L = input price on Vrbo)
 # The row whose first cell is "add guest" gives the extra-guest fee
 # (price column of that row).
 
@@ -153,6 +154,8 @@ def parse_price_rows(rows, cfg, label):
     c_date = col_index(cols.get("date", "A"))
     c_open = col_index(cols.get("open", "B"))
     c_min = col_index(cols.get("min", "D"))
+    c_booked = col_index(cols.get("booked", "C"))
+    auto_codes = {norm(w) for w in cfg.get("platform_booking_codes", ["A", "V"])}
     c_price = col_index(cols.get("price", "J"))
     extra_label = norm(cfg.get("extra_guest_label", "add guest"))
     closed_words = {norm(w) for w in cfg.get("closed_values", ["n", "no", "closed", "chiuso", "0", "false"])}
@@ -162,7 +165,7 @@ def parse_price_rows(rows, cfg, label):
     def cell(r, i):
         return r[i] if i < len(r) else None
 
-    days, closed, extra_fee = {}, set(), None
+    days, closed, direct, extra_fee = {}, set(), set(), None
     for r in rows:
         if not r:
             continue
@@ -174,6 +177,9 @@ def parse_price_rows(rows, cfg, label):
         day = to_date(cell(r, c_date), day_first)
         if day is None:
             continue
+        bk = norm(cell(r, c_booked))
+        if bk and bk not in auto_codes:      # W (or any note) = direct booking
+            direct.add(day)
         if norm(cell(r, c_open)) in closed_words:
             closed.add(day)
             continue
@@ -182,8 +188,8 @@ def parse_price_rows(rows, cfg, label):
             continue
         mn = to_number(cell(r, c_min))
         days[day] = {"p": round(price, 2), "m": max(1, int(mn)) if mn else default_min}
-    print(f"  {label}: {len(days)} priced nights, {len(closed)} closed nights")
-    return days, closed, extra_fee
+    print(f"  {label}: {len(days)} priced nights, {len(closed)} closed nights, {len(direct)} direct-booking nights")
+    return days, closed, direct, extra_fee
 
 
 def fetch_text(url):
@@ -200,30 +206,33 @@ def read_prices(cfg):
               (e.g. one tab per year).
     Source 2 (fallback): the Excel file in config "price_file".
     """
-    days, closed, extra_fee = {}, set(), None
+    days, closed, direct, extra_fee = {}, set(), set(), None
     urls = (os.environ.get("PRICE_SHEET_URL") or cfg.get("price_sheet_url") or "").split()
     cache = ROOT / "data" / ".cache_prices.json"
     if urls:
         try:
             for i, url in enumerate(urls, 1):
                 rows = list(csv.reader(io.StringIO(fetch_text(url))))
-                d, c, x = parse_price_rows(rows, cfg, f"Google Sheet {i}")
+                d, c, b, x = parse_price_rows(rows, cfg, f"Google Sheet {i}")
                 days.update(d)
                 closed |= c
+                direct |= b
                 extra_fee = x if x is not None else extra_fee
             if not days and not closed:
                 raise ValueError("the sheet contains no dates - check the published link")
             cache.write_text(json.dumps({"days": {k.isoformat(): v for k, v in days.items()},
                                          "closed": sorted(k.isoformat() for k in closed),
+                                         "direct": sorted(k.isoformat() for k in direct),
                                          "extra": extra_fee}))
-            return days, closed, extra_fee
+            return days, closed, direct, extra_fee
         except Exception as ex:
             print(f"  WARNING: could not read the Google Sheet ({ex})")
             if cache.exists():
                 c = json.loads(cache.read_text())
                 print("  using the last copy that was read successfully")
                 return ({D.fromisoformat(k): v for k, v in c["days"].items()},
-                        {D.fromisoformat(k) for k in c["closed"]}, c["extra"])
+                        {D.fromisoformat(k) for k in c["closed"]},
+                        {D.fromisoformat(k) for k in c.get("direct", [])}, c["extra"])
             print("  falling back to the Excel file")
 
     path = ROOT / cfg.get("price_file", "")
@@ -233,11 +242,12 @@ def read_prices(cfg):
         sys.exit("Missing package: run  pip install openpyxl")
     wb = openpyxl.load_workbook(path, data_only=True)
     for ws in wb.worksheets:
-        d, c, x = parse_price_rows([list(r) for r in ws.iter_rows(values_only=True)], cfg, f"Excel sheet '{ws.title}'")
+        d, c, b, x = parse_price_rows([list(r) for r in ws.iter_rows(values_only=True)], cfg, f"Excel sheet '{ws.title}'")
         days.update(d)
         closed |= c
+        direct |= b
         extra_fee = x if x is not None else extra_fee
-    return days, closed, extra_fee
+    return days, closed, direct, extra_fee
 
 
 # ---------------------------------------------------------------- blocked
@@ -349,7 +359,7 @@ def main():
     out_dir.mkdir(exist_ok=True)
 
     print("Reading prices ...")
-    days, closed, extra_fee = read_prices(cfg)
+    days, closed, direct, extra_fee = read_prices(cfg)
     if extra_fee is None:
         extra_fee = 0
     print(f"  extra guest fee: {extra_fee}")
@@ -362,8 +372,12 @@ def main():
     closed_periods = merge_ranges([(d, d + dt.timedelta(days=1)) for d in closed])
     print(f"  {len(closed_periods)} closed period(s) from the price sheet")
 
+    direct_periods = merge_ranges([(d, d + dt.timedelta(days=1)) for d in direct])
+    print(f"  {len(direct_periods)} direct booking(s) (W) from the price sheet")
+
     channel_events = {"blocked": [(s, e, note) for s, e, note in blocked] +
-                                 [(s, e, "Closed") for s, e in closed_periods]}
+                                 [(s, e, "Closed") for s, e in closed_periods] +
+                                 [(s, e, "Booked (direct)") for s, e in direct_periods]}
     for name, url in cfg.get("ical_feeds", {}).items():
         if not url:
             print(f"  {name}: no iCal link configured")
@@ -412,35 +426,48 @@ def main():
     }
     (out_dir / "availability.json").write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
 
-    def evs_for(*sources):
+    def booked_on(src):
+        return {n for s, e, note in channel_events.get(src, []) if is_booking(note) for n in nights(s, e)}
+
+    def evs_for(*sources, skip=frozenset()):
+        """Events from the given sources; nights in `skip` are cut out (split into pieces)."""
         rows = []
         for src in sources:
             for s, e, note in channel_events.get(src, []):
-                if e > today:
-                    rows.append((s, e, note, src))
+                if e <= today:
+                    continue
+                keep = [n for n in nights(s, e) if n not in skip]
+                for a, b in merge_ranges([(n, n + dt.timedelta(days=1)) for n in keep]):
+                    rows.append((a, b, note, src))
         return rows
 
     all_src = list(channel_events)
     write_ics(out_dir / "calendar.ics", evs_for(*all_src), "La Roccia del Poggio - all")
-    write_ics(out_dir / "for-airbnb.ics", evs_for(*[s for s in all_src if s != "airbnb"]),
+    # Each platform gets everything except its own feed - and not the nights that are already
+    # booked on it: otherwise its own booking, echoed back by the other platform as a block,
+    # would come back to it and could stay blocked after a cancellation.
+    write_ics(out_dir / "for-airbnb.ics", evs_for(*[s for s in all_src if s != "airbnb"], skip=booked_on("airbnb")),
               "La Roccia del Poggio - for Airbnb")
-    write_ics(out_dir / "for-vrbo.ics", evs_for(*[s for s in all_src if s != "vrbo"]),
+    write_ics(out_dir / "for-vrbo.ics", evs_for(*[s for s in all_src if s != "vrbo"], skip=booked_on("vrbo")),
               "La Roccia del Poggio - for Vrbo")
 
-    # booked nights (real reservations, not blocks) -> docs/booked.csv, read by the
-    # Google Sheet (tab "Booked") to fill the Booked column and colour the dates red
-    booked = set()
-    for src in ("airbnb", "vrbo"):
+    # per-night status on each platform -> docs/status.csv, read by the Google Sheet:
+    #   tab "Status" (columns F and J of the price sheet) and the sheet script that
+    #   writes A / V into the Booked column.  Only nights that are not open are listed.
+    #   Line format: day number, Airbnb status, Vrbo status, date   (status = Booked / Closed)
+    serial0 = D(1899, 12, 30)   # spreadsheet day numbers: match the sheet whatever its language
+    status = {}
+    for i, src in enumerate(("airbnb", "vrbo")):
         for s, e, summary in channel_events.get(src, []):
-            if is_booking(summary):
-                booked.update(nights(s, e))
-    for s, e, note in blocked:  # direct bookings typed in blocked.csv, e.g. "Booked - Rossi"
-        if is_booking(note):
-            booked.update(nights(s, e))
-    serial0 = D(1899, 12, 30)   # spreadsheet day numbers, so the sheet matches them whatever its language
-    (out_dir / "booked.csv").write_text(
-        "".join(f"{(d - serial0).days}\n" for d in sorted(booked)) or "0\n", encoding="utf-8")
-    print(f"  {len(booked)} booked nights written to booked.csv")
+            st = "Booked" if is_booking(summary) else "Closed"
+            for n in nights(s, e):
+                row = status.setdefault(n, ["", ""])
+                if row[i] != "Booked":
+                    row[i] = st
+    lines = [f"{(d - serial0).days},{a or 'Open'},{v or 'Open'},{d.isoformat()}\n" for d, (a, v) in sorted(status.items())]
+    (out_dir / "status.csv").write_text("".join(lines) or "0,Open,Open,1899-12-30\n", encoding="utf-8")
+    nb = sum(1 for a, v in status.values() if "Booked" in (a, v))
+    print(f"  status.csv: {len(status)} nights not open on Airbnb/Vrbo, {nb} of them booked")
 
     priced = [d for d in days if d >= today]
     print(f"Done: {len(priced)} future priced nights, {len(unavailable)} unavailable nights")
