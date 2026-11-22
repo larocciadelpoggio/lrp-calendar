@@ -9,8 +9,10 @@ Reads:
   * data/blocked.csv (extra dates you block yourself - optional)
   * the Airbnb and Vrbo iCal export links (config.json or env vars)
 
-Nights marked 0 (closed) in the sheet are closed on the website AND sent to
-Airbnb and Vrbo through for-airbnb.ics / for-vrbo.ics.
+Column B of the sheet is the master. Nights marked 0 (closed) or W (direct booking)
+are closed on the website AND sent to Airbnb and Vrbo through for-airbnb.ics /
+for-vrbo.ics, together with the real bookings of the other platform. A platform's own
+closed days are not passed on (they only show in the sheet's status columns).
 
 Writes (to docs/, served by GitHub Pages):
   * availability.json  - nightly price, minimum stay and booked nights, read by the website calendar
@@ -405,9 +407,15 @@ def main():
             print(f"    event titles: {kinds}")
 
     today = D.today()
+    # Column B of the sheet is the master: the website and the feeds sent to Airbnb/Vrbo use
+    # only our own closures (B = 0, W, blocked.csv) and real BOOKINGS on Airbnb/Vrbo -
+    # never a platform's own closed days (those only show in the sheet's status columns).
+    def bookings_only(evs):
+        return [(s, e, note) for s, e, note in evs if is_booking(note)]
+
     unavailable = set()
-    for evs in channel_events.values():
-        for s, e, _ in evs:
+    for src, evs in channel_events.items():
+        for s, e, _ in (evs if src == "blocked" else bookings_only(evs)):
             for n in nights(s, e):
                 if n >= today:
                     unavailable.add(n)
@@ -433,7 +441,8 @@ def main():
         """Events from the given sources; nights in `skip` are cut out (split into pieces)."""
         rows = []
         for src in sources:
-            for s, e, note in channel_events.get(src, []):
+            evs = channel_events.get(src, [])
+            for s, e, note in (evs if src == "blocked" else bookings_only(evs)):
                 if e <= today:
                     continue
                 keep = [n for n in nights(s, e) if n not in skip]
