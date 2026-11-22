@@ -7,7 +7,7 @@ on:
       - "config.json"
       - "build.py"
   schedule:
-    - cron: "17 */3 * * *"   # every 3 hours: re-read Airbnb and Vrbo
+    - cron: "17 * * * *"     # every hour: re-read the Google Sheet, Airbnb and Vrbo
   workflow_dispatch: {}        # "Run workflow" button on GitHub
 
 permissions:
@@ -28,6 +28,7 @@ jobs:
       - run: pip install openpyxl
       - name: Build availability
         env:
+          PRICE_SHEET_URL: ${{ secrets.PRICE_SHEET_URL }}
           AIRBNB_ICAL_URL: ${{ secrets.AIRBNB_ICAL_URL }}
           VRBO_ICAL_URL: ${{ secrets.VRBO_ICAL_URL }}
         run: python build.py
