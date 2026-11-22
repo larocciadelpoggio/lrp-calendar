@@ -3,9 +3,14 @@
 Villa La Roccia del Poggio - price & availability builder.
 
 Reads:
-  * the price list Excel (one sheet per year, columns "min days" and "direct")
-  * data/blocked.csv (dates you block yourself)
+  * the price sheet: the Google Sheet published as CSV (secret PRICE_SHEET_URL),
+    or the Excel file in data/ as a fallback. Columns are set in config.json:
+    date (A), available 1/0 (B), minimum nights (D), website price (J = Vrbo input)
+  * data/blocked.csv (extra dates you block yourself - optional)
   * the Airbnb and Vrbo iCal export links (config.json or env vars)
+
+Nights marked 0 (closed) in the sheet are closed on the website AND sent to
+Airbnb and Vrbo through for-airbnb.ics / for-vrbo.ics.
 
 Writes (to docs/, served by GitHub Pages):
   * availability.json  - nightly price, minimum stay and booked nights, read by the website calendar
@@ -17,21 +22,23 @@ Usage:
   python build.py                 # build everything
   python build.py --no-fetch      # skip downloading Airbnb/Vrbo calendars
 
-Environment variables AIRBNB_ICAL_URL / VRBO_ICAL_URL override config.json
-(use them as GitHub "secrets" so the private links are not public).
+Environment variables PRICE_SHEET_URL / AIRBNB_ICAL_URL / VRBO_ICAL_URL
+override config.json (use them as GitHub "secrets" so the links stay private).
 """
 import csv
 import datetime as dt
+import io
 import json
 import os
+import re
 import sys
 import urllib.request
 from pathlib import Path
 
 try:
     import openpyxl
-except ImportError:
-    sys.exit("Missing package: run  pip install openpyxl")
+except ImportError:  # only needed for the Excel fallback
+    openpyxl = None
 
 ROOT = Path(__file__).resolve().parent
 D = dt.date
@@ -48,55 +55,189 @@ def load_config():
 
 
 # ---------------------------------------------------------------- prices
+# The price sheet (Google Sheet or Excel) has one row per date. Which column
+# holds what is set in config.json -> "columns" (spreadsheet letters):
+#   date  = the date                      (A)
+#   open  = 1 / 0 - 0 closes the night     (B)
+#   (C = Booked, filled in by the sheet itself from docs/booked.csv)
+#   min   = minimum nights from that date (D)
+#   price = website price per night       (J = input price on Vrbo)
+# The row whose first cell is "add guest" gives the extra-guest fee
+# (price column of that row).
+
 def norm(v):
     return str(v).strip().lower() if v is not None else ""
 
 
-def read_prices(cfg):
-    """Return ({date: {"p": price, "m": min_nights}}, extra_guest_fee)."""
-    path = ROOT / cfg["price_file"]
-    wb = openpyxl.load_workbook(path, data_only=True)
-    price_col_name = norm(cfg.get("price_column", "direct"))
-    min_col_name = norm(cfg.get("min_nights_column", "min days"))
-    extra_label = norm(cfg.get("extra_guest_label", "add guest"))
-    days, extra_fee = {}, None
+def col_index(letter):
+    n = 0
+    for ch in letter.strip().upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
 
-    for ws in wb.worksheets:
-        rows = list(ws.iter_rows(values_only=True))
-        # locate the header row containing the price column name
-        price_col = min_col = None
-        for r in rows[:15]:
-            cells = [norm(c) for c in r]
-            if price_col_name in cells:
-                price_col = cells.index(price_col_name)
-                if min_col_name in cells:
-                    min_col = cells.index(min_col_name)
-                break
-        if price_col is None:
-            print(f"  sheet '{ws.title}': no '{price_col_name}' column, skipped")
+
+def to_number(v):
+    """Numbers from Excel are floats; from a Google CSV they are text like '1.234,50' or '€ 124'."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).replace("€", "").replace("EUR", "").replace(" ", "").replace(" ", "").strip()
+    if not s or s in ("-", "#N/A", "#VALUE!", "#REF!"):
+        return None
+    if "," in s and "." in s:          # 1.234,50 (it) or 1,234.50 (en)
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:                     # 124,5
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+MONTHS = {  # English and Italian month abbreviations, as Google Sheets shows them
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "gen": 1, "mag": 5, "giu": 6, "lug": 7, "ago": 8, "set": 9, "ott": 10, "dic": 12,
+}
+
+
+def to_date_words(s):
+    """'Mon 01-Mar-27', 'lun 01-mar-27', '1 mar 2027' ... -> date (weekday ignored)."""
+    parts = [p for p in re.split(r"[\s\-./,]+", s.lower()) if p]
+    nums = [p for p in parts if p.isdigit()]
+    # the month is the LAST word: the first one may be a weekday ('mar' = martedì and marzo)
+    mon = next((MONTHS[p[:3]] for p in reversed(parts) if p[:3] in MONTHS and not p.isdigit()), None)
+    if mon is None or len(nums) < 2:
+        return None
+    day, year = int(nums[0]), int(nums[1])
+    if year < 100:
+        year += 2000
+    try:
+        return dt.date(year, mon, day)
+    except ValueError:
+        return None
+
+
+def to_date(v, day_first=True):
+    if isinstance(v, dt.datetime):
+        return v.date()
+    if isinstance(v, dt.date):
+        return v
+    s = str(v or "").strip()
+    if not s or not any(ch.isdigit() for ch in s):
+        return None
+    if any(ch.isalpha() for ch in s):
+        return to_date_words(s)
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return dt.datetime.strptime(s[:10], fmt).date()
+        except ValueError:
+            pass
+    fmts = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%y") if day_first else \
+           ("%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%m/%d/%y")
+    for fmt in fmts:
+        try:
+            return dt.datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def parse_price_rows(rows, cfg, label):
+    """rows: list of lists of cell values. Returns (days, closed, extra_fee)."""
+    cols = cfg.get("columns", {})
+    c_date = col_index(cols.get("date", "A"))
+    c_open = col_index(cols.get("open", "B"))
+    c_min = col_index(cols.get("min", "D"))
+    c_price = col_index(cols.get("price", "J"))
+    extra_label = norm(cfg.get("extra_guest_label", "add guest"))
+    closed_words = {norm(w) for w in cfg.get("closed_values", ["n", "no", "closed", "chiuso", "0", "false"])}
+    default_min = int(cfg.get("default_min_nights", 3))
+    day_first = cfg.get("day_first", True)
+
+    def cell(r, i):
+        return r[i] if i < len(r) else None
+
+    days, closed, extra_fee = {}, set(), None
+    for r in rows:
+        if not r:
             continue
-        if min_col is None:
-            min_col = 1
-        n = 0
-        for r in rows:
-            first = r[0] if r else None
-            if norm(first) == extra_label and price_col < len(r) and r[price_col] is not None:
-                extra_fee = float(r[price_col])
-                continue
-            if isinstance(first, (dt.datetime, dt.date)):
-                day = first.date() if isinstance(first, dt.datetime) else first
-                price = r[price_col] if price_col < len(r) else None
-                if price in (None, ""):
-                    continue
-                mn = r[min_col] if min_col < len(r) else None
-                try:
-                    mn = int(mn) if mn not in (None, "") else int(cfg.get("default_min_nights", 1))
-                except (TypeError, ValueError):
-                    mn = int(cfg.get("default_min_nights", 1))
-                days[day] = {"p": round(float(price), 2), "m": max(1, mn)}
-                n += 1
-        print(f"  sheet '{ws.title}': {n} priced nights")
-    return days, extra_fee
+        if norm(cell(r, 0)) == extra_label:
+            fee = to_number(cell(r, c_price))
+            if fee is not None:
+                extra_fee = fee
+            continue
+        day = to_date(cell(r, c_date), day_first)
+        if day is None:
+            continue
+        if norm(cell(r, c_open)) in closed_words:
+            closed.add(day)
+            continue
+        price = to_number(cell(r, c_price))
+        if not price:              # empty or 0 = no price yet = not bookable on the website
+            continue
+        mn = to_number(cell(r, c_min))
+        days[day] = {"p": round(price, 2), "m": max(1, int(mn)) if mn else default_min}
+    print(f"  {label}: {len(days)} priced nights, {len(closed)} closed nights")
+    return days, closed, extra_fee
+
+
+def fetch_text(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (LRP calendar sync)"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8-sig", errors="replace")
+
+
+def read_prices(cfg):
+    """Return (days, closed_nights, extra_guest_fee).
+
+    Source 1: PRICE_SHEET_URL (GitHub secret) = the Google Sheet tab published
+              as CSV. Several links can be given, separated by spaces/new lines
+              (e.g. one tab per year).
+    Source 2 (fallback): the Excel file in config "price_file".
+    """
+    days, closed, extra_fee = {}, set(), None
+    urls = (os.environ.get("PRICE_SHEET_URL") or cfg.get("price_sheet_url") or "").split()
+    cache = ROOT / "data" / ".cache_prices.json"
+    if urls:
+        try:
+            for i, url in enumerate(urls, 1):
+                rows = list(csv.reader(io.StringIO(fetch_text(url))))
+                d, c, x = parse_price_rows(rows, cfg, f"Google Sheet {i}")
+                days.update(d)
+                closed |= c
+                extra_fee = x if x is not None else extra_fee
+            if not days and not closed:
+                raise ValueError("the sheet contains no dates - check the published link")
+            cache.write_text(json.dumps({"days": {k.isoformat(): v for k, v in days.items()},
+                                         "closed": sorted(k.isoformat() for k in closed),
+                                         "extra": extra_fee}))
+            return days, closed, extra_fee
+        except Exception as ex:
+            print(f"  WARNING: could not read the Google Sheet ({ex})")
+            if cache.exists():
+                c = json.loads(cache.read_text())
+                print("  using the last copy that was read successfully")
+                return ({D.fromisoformat(k): v for k, v in c["days"].items()},
+                        {D.fromisoformat(k) for k in c["closed"]}, c["extra"])
+            print("  falling back to the Excel file")
+
+    path = ROOT / cfg.get("price_file", "")
+    if not path.is_file():
+        sys.exit("No price source: set the PRICE_SHEET_URL secret or put the Excel file in data/")
+    if openpyxl is None:
+        sys.exit("Missing package: run  pip install openpyxl")
+    wb = openpyxl.load_workbook(path, data_only=True)
+    for ws in wb.worksheets:
+        d, c, x = parse_price_rows([list(r) for r in ws.iter_rows(values_only=True)], cfg, f"Excel sheet '{ws.title}'")
+        days.update(d)
+        closed |= c
+        extra_fee = x if x is not None else extra_fee
+    return days, closed, extra_fee
 
 
 # ---------------------------------------------------------------- blocked
@@ -157,12 +298,6 @@ def parse_ics(text):
     return events
 
 
-def fetch_ics(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (LRP calendar sync)"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", errors="replace")
-
-
 def nights(start, end):
     d = start
     while d < end:
@@ -186,6 +321,15 @@ def write_ics(path, events, name):
     path.write_text("\r\n".join(out) + "\r\n", encoding="utf-8")
 
 
+def is_booking(summary):
+    """True for a real reservation, False for a block.
+    Airbnb exports reservations as 'Reserved' and blocks as 'Airbnb (Not available)'."""
+    s = (summary or "").lower()
+    if any(w in s for w in ("not available", "unavailable", "blocked", "bloccat", "non disponibile", "closed")):
+        return False
+    return any(w in s for w in ("reserv", "book", "prenot", "riserv"))
+
+
 def merge_ranges(events):
     """Merge overlapping/adjacent (start, end) ranges."""
     merged = []
@@ -205,16 +349,21 @@ def main():
     out_dir.mkdir(exist_ok=True)
 
     print("Reading prices ...")
-    days, extra_fee = read_prices(cfg)
+    days, closed, extra_fee = read_prices(cfg)
     if extra_fee is None:
         extra_fee = 0
     print(f"  extra guest fee: {extra_fee}")
 
     print("Reading blocked dates ...")
     blocked = read_blocked(cfg)
-    print(f"  {len(blocked)} blocked period(s)")
+    print(f"  {len(blocked)} blocked period(s) in blocked.csv")
 
-    channel_events = {"blocked": [(s, e, note) for s, e, note in blocked]}
+    # nights marked closed (0) in the sheet, merged into periods
+    closed_periods = merge_ranges([(d, d + dt.timedelta(days=1)) for d in closed])
+    print(f"  {len(closed_periods)} closed period(s) from the price sheet")
+
+    channel_events = {"blocked": [(s, e, note) for s, e, note in blocked] +
+                                 [(s, e, "Closed") for s, e in closed_periods]}
     for name, url in cfg.get("ical_feeds", {}).items():
         if not url:
             print(f"  {name}: no iCal link configured")
@@ -223,7 +372,7 @@ def main():
             print(f"  {name}: skipped (--no-fetch)")
             continue
         try:
-            evs = parse_ics(fetch_ics(url))
+            evs = parse_ics(fetch_text(url))
             channel_events[name] = evs
             print(f"  {name}: {len(evs)} event(s)")
         except Exception as ex:  # keep last good data if a feed fails
@@ -235,7 +384,11 @@ def main():
                 print(f"  {name}: using last saved copy")
         else:
             (ROOT / "data" / f".cache_{name}.json").write_text(
-                json.dumps([(s.isoformat(), e.isoformat(), "Booked") for s, e, c in evs]))
+                json.dumps([(s.isoformat(), e.isoformat(), c) for s, e, c in evs]))
+            kinds = {}
+            for _, _, c in evs:
+                kinds[c] = kinds.get(c, 0) + 1
+            print(f"    event titles: {kinds}")
 
     today = D.today()
     unavailable = set()
@@ -273,6 +426,21 @@ def main():
               "La Roccia del Poggio - for Airbnb")
     write_ics(out_dir / "for-vrbo.ics", evs_for(*[s for s in all_src if s != "vrbo"]),
               "La Roccia del Poggio - for Vrbo")
+
+    # booked nights (real reservations, not blocks) -> docs/booked.csv, read by the
+    # Google Sheet (tab "Booked") to fill the Booked column and colour the dates red
+    booked = set()
+    for src in ("airbnb", "vrbo"):
+        for s, e, summary in channel_events.get(src, []):
+            if is_booking(summary):
+                booked.update(nights(s, e))
+    for s, e, note in blocked:  # direct bookings typed in blocked.csv, e.g. "Booked - Rossi"
+        if is_booking(note):
+            booked.update(nights(s, e))
+    serial0 = D(1899, 12, 30)   # spreadsheet day numbers, so the sheet matches them whatever its language
+    (out_dir / "booked.csv").write_text(
+        "".join(f"{(d - serial0).days}\n" for d in sorted(booked)) or "0\n", encoding="utf-8")
+    print(f"  {len(booked)} booked nights written to booked.csv")
 
     priced = [d for d in days if d >= today]
     print(f"Done: {len(priced)} future priced nights, {len(unavailable)} unavailable nights")

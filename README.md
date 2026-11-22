@@ -2,27 +2,31 @@
 
 The system takes three inputs:
 
-- your price Excel: the **direct** column gives the nightly price, **min days** gives the minimum stay, and the **add guest** row gives the fee per extra guest per night above 6;
-- your own blocked dates (`data/blocked.csv`);
+- your **price sheet** in Google Sheets (`house_rental_price`, on larocciadelpoggio@gmail.com, tab **Prices**):
+
+  | A | B | C | D | E | F–I Airbnb | J–M Vrbo |
+  |---|---|---|---|---|---|---|
+  | Date | Available 1/0 | Booked W/A/V | Min stay | Input price (yellow) | Status · Net · **Input on Airbnb** (pink) · Client | Status · Net · **Input on Vrbo** (blue) · Client |
+
+  - **B** is yours: 0 closes a night on the website, Airbnb and Vrbo.
+  - **C**: type **W** for a website/direct booking (blocks all three). **A** (Airbnb) and **V** (Vrbo) are written by the sheet's script every hour; it never overwrites what you type.
+  - **F / J** (status on Airbnb / Vrbo: Open, Closed, Booked) fill in by themselves from `status.csv`, through the tab **Status**.
+  - The website price is column **L** (the Vrbo input, before Vrbo's guest markup).
+- optional extra blocked dates (`data/blocked.csv`);
 - the Airbnb and Vrbo calendars.
 
-From these it builds a booking calendar for the website. The calendar shows:
+From these it builds a booking calendar for the website. Prices are **not** shown per night: the visitor picks dates and guests, then sees the total and a "Request booking by email" button.
 
-- the nightly price for each date;
-- the minimum stay;
-- which nights are booked;
-- a total price for the dates and number of guests the visitor picks.
+Nights marked **0** in the sheet are closed on the website **and** on Airbnb and Vrbo, through the calendar links. Airbnb and Vrbo **prices and minimum stays are not synced**, because their calendar links only carry blocked dates; those you set on each platform.
 
-Visitors send a booking request with a "Request booking by email" button that opens a pre-filled email. The system also builds calendar feeds, so Airbnb and Vrbo can block each other's bookings and your own blocked dates.
-
-GitHub runs everything for free. It re-reads Airbnb and Vrbo every 3 hours, and it rebuilds the calendar straight away each time you upload a new Excel or blocked-dates file.
+GitHub runs everything for free and re-reads the sheet, Airbnb and Vrbo every hour.
 
 ```
-Lista_prezzi_website.xlsx ─┐
-data/blocked.csv ──────────┼─> build.py ─> docs/availability.json  (website calendar)
-Airbnb iCal ───────────────┤               docs/for-airbnb.ics     (import into Airbnb)
-Vrbo iCal ─────────────────┘               docs/for-vrbo.ics       (import into Vrbo)
-                                           docs/calendar.ics       (everything, for your phone)
+Google Sheet (A-E,L) ──┐
+data/blocked.csv ──────┼─> build.py ─> docs/availability.json  (website calendar)
+Airbnb iCal ───────────┤               docs/for-airbnb.ics     (import into Airbnb)
+Vrbo iCal ─────────────┘               docs/for-vrbo.ics       (import into Vrbo)
+                                       docs/calendar.ics       (everything, for your phone)
 ```
 
 ---
@@ -33,7 +37,7 @@ Vrbo iCal ─────────────────┘               d
 1. Create a free account at https://github.com (if you don't have one).
 2. Click **+ → New repository**. Fill it in as follows:
    - Name: `lrp-calendar`.
-   - Visibility: **Public**. GitHub Pages is only free for public repos. This means the Excel is publicly readable, Airbnb/Vrbo columns included. If you don't want that, delete those two columns before uploading; only "min days" and "direct" are needed.
+   - Visibility: **Public**. GitHub Pages is only free for public repos, so don't put your price Excel in the repo: the prices live in the private Google Sheet.
    - Click **Create**.
 3. On the new repo page, click **uploading an existing file**. Drag in **all the contents** of this folder: `build.py`, `block.py`, `config.json`, `README.md`, and the `data`, `docs` and `.github` folders. Then click **Commit changes**.
    - The `.github` folder is hidden in Windows Explorer. If it doesn't upload, create it on GitHub instead: **Add file → Create new file**, type the name `.github/workflows/update.yml`, and paste the content of that file.
@@ -88,23 +92,25 @@ If the calendar looks cut off on phones, set the embed height to about 1000px on
 
 ## 2. Everyday use
 
-### Update prices
-Edit your Excel, keeping the same layout: dates in column A, plus the **min days** and **direct** columns and the **add guest** row. You can add a sheet for each new year (2027, …); every sheet is read.
+### Update prices, minimum stays, open/closed days
+Edit the Google Sheet: price in the yellow column E, minimum stay in D, **1**/**0** in B, **W** in C for a direct booking. To add dates, copy the last row down. The website and the Airbnb/Vrbo blocked dates follow within about an hour. To update at once: **Actions → Update calendar → Run workflow**.
 
-On GitHub, open the `data` folder, then **Add file → Upload files**. Upload it with **exactly the same name**, `Lista_prezzi_website.xlsx`, and click **Commit**. The website updates in about 1 minute.
+Then copy the pink column H to Airbnb and the blue column L to Vrbo, with the minimum stays, yourself, since the calendar links can't carry them.
 
-### Block dates (your own use, maintenance, direct bookings)
-On GitHub, open `data/blocked.csv`, click the ✏️ pencil, add a line and click **Commit changes**:
+### Sheet script (one-time)
+In the Google Sheet: **Extensions → Apps Script**, delete what is there, paste `google-sheet-script.gs`, click 💾 Save, choose **setup** in the function list, click **Run** and allow access. It then fills A/V in column C every hour.
+
+### Google Sheet link (one-time)
+In the sheet: **File → Share → Publish to web**, choose the tab **Prices** and **Comma-separated values (.csv)**, then **Publish**. Copy the link and save it in GitHub as the secret `PRICE_SHEET_URL` (**Settings → Secrets and variables → Actions**). For a second tab (e.g. a new year), publish it too and put both links in the secret, separated by a space.
+
+### Extra blocked dates (optional)
+You can also block dates in `data/blocked.csv` (✏️ pencil on GitHub, one line per period):
 
 ```
 2026-08-01,2026-08-08,Family holiday
 ```
 
-"from" is the first night that is blocked. "to" is the check-out day: that night stays free. The example above blocks the nights of 1–7 August.
-
-The note is private. It never shows on the website or in the calendars, which only show "Not available".
-
-To unblock dates, delete the line.
+"from" is the first night that is blocked. "to" is the check-out day: that night stays free. The note is private.
 
 ### Check sync
 Open the **Actions** tab. Every run is listed there with a green tick or a red cross. Click a run to see how many bookings were read from Airbnb and Vrbo.
@@ -133,14 +139,16 @@ To preview, open `docs/index.html` after running `python -m http.server` in this
 
 | key | meaning |
 |---|---|
-| `price_column` / `min_nights_column` | Excel column headers to read (`direct`, `min days`) |
+| `columns` | sheet columns for date (A), available (B), booked (C), minimum stay (D), website price (L) |
+| `closed_values` | what counts as closed in the Available column (0, N, No, Closed, Chiuso) |
 | `extra_guest_label` | label of the row holding the extra-guest fee (`add guest`) |
 | `base_guests` / `max_guests` | guests included in the price (6) / maximum guests (13) |
-| `default_min_nights` | used when a date has no "min days" value |
+| `default_min_nights` | used when a date has no minimum stay |
 | `booking_email` | where booking requests are sent |
 | `fees_note_en` / `fees_note_it` | note shown under the total |
+| `price_file` | Excel used only if the Google Sheet can't be read and no saved copy exists |
 
 ## How the rules work
-- **Prices.** The price for a stay is the sum of the "direct" price of each night. On top of that, each guest above 6 costs the "add guest" fee per night.
+- **Prices.** The price for a stay is the sum of the column L price of each night. On top of that, each guest above 6 costs the "add guest" fee per night.
 - **Minimum stay.** The minimum stay is the "min days" value of the **check-in** date.
-- **Unavailable dates.** Dates with no price in the Excel can't be booked. The same goes for nights that are blocked or booked on Airbnb or Vrbo. A booked night can still be chosen as a check-out day.
+- **Unavailable dates.** Nights marked 0, or with no price, can't be booked. The same goes for nights blocked in blocked.csv or booked on Airbnb or Vrbo. Only nights marked 0 (and blocked.csv) are sent to Airbnb and Vrbo. A booked night can still be chosen as a check-out day.

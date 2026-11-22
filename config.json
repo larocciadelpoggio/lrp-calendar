@@ -1,24 +1,40 @@
 {
-  "price_file": "data/Lista_prezzi_website.xlsx",
-  "price_column": "direct",
-  "min_nights_column": "min days",
+  "price_sheet_url": "",
+  "price_file": "data/house_rental_price.xlsx",
+  "columns": {
+    "date": "A",
+    "open": "B",
+    "booked": "C",
+    "min": "D",
+    "price": "L"
+  },
+  "closed_values": [
+    "0",
+    "0.0",
+    "0,0",
+    "N",
+    "No",
+    "Closed",
+    "Chiuso"
+  ],
   "extra_guest_label": "add guest",
+  "day_first": true,
   "blocked_file": "data/blocked.csv",
-
   "currency": "EUR",
   "base_guests": 6,
   "max_guests": 13,
   "default_min_nights": 3,
   "booking_email": "larocciadelpoggio@gmail.com",
   "property_name": "Villa La Roccia del Poggio",
-
   "fees_note_en": "Cleaning fee (EUR 160-200) payable on arrival. Final price confirmed by email.",
   "fees_note_it": "Pulizie finali (160-200 EUR) da pagare all'arrivo. Prezzo finale confermato via email.",
-
   "ical_feeds": {
     "airbnb": "",
     "vrbo": ""
   },
-
-  "output_dir": "docs"
+  "output_dir": "docs",
+  "platform_booking_codes": [
+    "A",
+    "V"
+  ]
 }
