@@ -1,4 +1,5 @@
 /* Villa La Roccia del Poggio - availability & price calendar widget.
+   Prices are not shown per night: the total appears once the guest picks dates.
    Embed:  <div id="lrp-calendar" data-lang="en"></div>
            <script src="https://YOUR-NAME.github.io/lrp-calendar/calendar.js" defer></script>
 */
@@ -11,7 +12,7 @@
     en: {
       months: ["January","February","March","April","May","June","July","August","September","October","November","December"],
       days: ["Mo","Tu","We","Th","Fr","Sa","Su"],
-      title: "Prices & availability", checkin: "Check-in", checkout: "Check-out", guests: "Guests",
+      title: "Availability & prices", intro: "Select your dates to see the price of your stay.", checkin: "Check-in", checkout: "Check-out", guests: "Guests",
       pickIn: "Select your arrival date", pickOut: "Now select your departure date",
       nights: function (n) { return n + (n === 1 ? " night" : " nights"); },
       perNight: "per night", from: "from", minStay: function (n) { return "Minimum stay " + n + (n === 1 ? " night" : " nights"); },
@@ -30,7 +31,7 @@
     it: {
       months: ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"],
       days: ["Lu","Ma","Me","Gi","Ve","Sa","Do"],
-      title: "Prezzi e disponibilità", checkin: "Arrivo", checkout: "Partenza", guests: "Ospiti",
+      title: "Disponibilità e prezzi", intro: "Seleziona le date per vedere il prezzo del soggiorno.", checkin: "Arrivo", checkout: "Partenza", guests: "Ospiti",
       pickIn: "Seleziona la data di arrivo", pickOut: "Ora seleziona la data di partenza",
       nights: function (n) { return n + (n === 1 ? " notte" : " notti"); },
       perNight: "a notte", from: "da", minStay: function (n) { return "Soggiorno minimo " + n + (n === 1 ? " notte" : " notti"); },
@@ -64,7 +65,7 @@
     ".lrp-month h4{text-align:center;font-size:15px;font-weight:600;margin:4px 0 8px}" +
     ".lrp-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}" +
     ".lrp-dow{font-size:11px;color:#888;text-align:center;padding:4px 0}" +
-    ".lrp-d{border:0;background:#f4f8f4;border-radius:6px;padding:5px 0 4px;text-align:center;cursor:pointer;min-height:44px;font:inherit;color:inherit}" +
+    ".lrp-d{border:0;background:#f4f8f4;border-radius:6px;padding:0;text-align:center;cursor:pointer;min-height:38px;font:inherit;color:inherit}" +
     ".lrp-d .n{display:block;font-size:13px;font-weight:600}" +
     ".lrp-d .p{display:block;font-size:10px;color:#2f6f3e;margin-top:1px}" +
     ".lrp-d.empty{background:transparent;cursor:default}" +
@@ -160,17 +161,16 @@
       var dim = new Date(y, m + 1, 0).getDate();
       var end = cout || (cin && hover && hover > cin ? hover : null);
       for (var dd = 1; dd <= dim; dd++) {
-        var d = new Date(y, m, dd), k = iso(d), info = days[k], cls = "lrp-d", price = "";
+        var d = new Date(y, m, dd), k = iso(d), info = days[k], cls = "lrp-d";
         var past = d < today;
         if (past || !info) cls += " off";
         else if (busy[k]) cls += " busy";
-        if (info && !past) price = money(info.p);
         // a booked night can still be a check-out day
         if (cin && !cout && d > cin && (busy[k] || !info) && !check(cin, d)) cls = cls.replace(" busy", "").replace(" off", "") + " co";
         if (cin && +d === +cin) cls += " edge";
         else if (cout && +d === +cout) cls += " edge";
         else if (cin && end && d > cin && d < end) cls += " range";
-        h += "<button type='button' class='" + cls + "' data-k='" + k + "'><span class='n'>" + dd + "</span><span class='p'>" + (price || "&nbsp;") + "</span></button>";
+        h += "<button type='button' class='" + cls + "' data-k='" + k + "'><span class='n'>" + dd + "</span></button>";
       }
       return h + "</div></div>";
     }
@@ -210,8 +210,7 @@
     function draw() {
       var next = new Date(view.getFullYear(), view.getMonth() + 1, 1);
       var h = "<h3>" + t.title + "</h3>";
-      var future = keys.filter(function (k) { return parse(k) >= today; }).map(function (k) { return days[k].p; });
-      if (future.length) h += "<p class='lrp-sub'>" + t.from + " " + money(Math.min.apply(null, future)) + " " + t.perNight + "</p>";
+      h += "<p class='lrp-sub'>" + t.intro + "</p>";
       h += "<div class='lrp-wrap'><div class='lrp-cal'><div class='lrp-nav'><button type='button' class='lrp-prev'" + (view <= minView ? " disabled" : "") + ">‹</button><span></span><button type='button' class='lrp-next'" + (next > maxView ? " disabled" : "") + ">›</button></div>";
       h += "<div class='lrp-months'>" + month(view) + month(next) + "</div>";
       h += "<div class='lrp-legend'><span><i style='background:#f4f8f4;border:1px solid #cfe3d3'></i>" + t.legendFree + "</span><span><i style='background:#f2f2f2'></i>" + t.legendBusy + "</span><span><i style='background:#cfe3d3'></i>" + t.legendSel + "</span></div></div>";
