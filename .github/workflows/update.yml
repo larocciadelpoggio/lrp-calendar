@@ -1,0 +1,39 @@
+name: Update calendar
+
+on:
+  push:
+    paths:
+      - "data/**"
+      - "config.json"
+      - "build.py"
+  schedule:
+    - cron: "17 */3 * * *"   # every 3 hours: re-read Airbnb and Vrbo
+  workflow_dispatch: {}        # "Run workflow" button on GitHub
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-calendar
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install openpyxl
+      - name: Build availability
+        env:
+          AIRBNB_ICAL_URL: ${{ secrets.AIRBNB_ICAL_URL }}
+          VRBO_ICAL_URL: ${{ secrets.VRBO_ICAL_URL }}
+        run: python build.py
+      - name: Save results
+        run: |
+          git config user.name "calendar-bot"
+          git config user.email "calendar-bot@users.noreply.github.com"
+          git add docs data/.cache_*.json 2>/dev/null || git add docs
+          if git diff --cached --quiet; then echo "No changes"; else git commit -m "Update calendar [skip ci]" && git push; fi
